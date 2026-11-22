@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "forge-std/Test.sol";
+import "../src/Mocks.sol";
+
+// MINOR 12 — Tim C.
+//  - K-3267 WATCH: 0x2591a130(1,0) on live Agreement v4.1 returns 0 (re-probe).
+//  - K-3268 WATCH: claimTo 2-arg reverts (dormant, re-probe).
+//  - K-3274 (M-924): B-15 re-grade — settled-deal reuse leg (from Round31
+//    K-3094). Settle a REAL deal 0 in escrow v3, then createAgreement
+//    kind-4 -> escrow v3 value 0, release -> +500.
+//  - K-3276 (M-926): NEW — kind-9 DATA=encode(3) with THREE attests
+//    (max index 2). Out-of-range veto index must still revert at creation.
+//  - K-3280 (M-930): NEW — panel k bound: k=0 must revert at creation
+//    (1 <= k <= voter); k=3/n=3 must create fine (control in same test).
+//  - K-3281 (M-931): NEW — panel quorum [attacker] k=2: creation REVERTS
+//    (k exceeds voter count 1 — the on-chain k bound). KILL, not BELOW BAR.
+//    Throwaway local keys only. No mainnet, no live calls.
+
+interface IEscrowV3 {
+    struct DealP { address seller; address sellerPayout; address buyerReceive; address sellToken; uint256 sellAmount; address payToken; uint256 payAmount; uint64 deadline; }
+    struct Quote { uint16 feeBps; uint64 expiry; bytes sig; }
+    struct Consent { uint64 validUntil; bytes sig; }
+    function createDeal(DealP calldata p, Quote calldata q, Consent calldata c) external returns (uint256);
+    function fundPayment(uint256 id) external payable;
+    function fundTokens(uint256 id) external;
+    function deals(uint256 id) external view returns (address buyer, address seller, address sellToken, uint256 sellAmount, address payToken, uint256 payAmount, uint64 deadline, bool buyerFunded, bool sellerFunded, uint8 status, address sellerPayout, address buyerReceive, uint16 feeBps);
+}
+
+interface IAgreementV41 {
+    struct Cond { uint8 kind; address target; bytes data; uint256 value; }
+    struct AgrP { address payee; address asset; uint256 amount; uint64 expiry; bytes32 termsHash; Cond[] conditions; }
+    struct Fee { uint256 feeWei; uint64 expiry; bytes sig; }
+    function createAgreement(AgrP calldata p, Fee calldata q) external payable returns (uint256);
+    function attest(uint256 id, uint256 index) external returns (bool);
+    function vote(uint256 id, uint256 index) external returns (bool);
+    function release(uint256 id) external returns (bool);
+}
+
+contract Minor12CTest is Test {
+    address constant AGREEMENT = 0x7AB58fAAe65eFCF0037635382cAA546EaC233DA6;
+    address constant ESCROW_V3 = 0xd961cA37e339E14e0D3478383a252E218fe7aa4a;
+
+    uint256 constant VICTIM_PK = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+    uint256 constant SELLER_PK = 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d;
+    uint256 constant ATTACKER_PK = 0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a;
+    address victim;
+    address seller;
+    address attacker;
+
+    MockERC20 usdg;
+    MockERC20 sellToken;
+
+    function setUp() public {
+        vm.chainId(4663);
+        victim = vm.addr(VICTIM_PK);
+        seller = vm.addr(SELLER_PK);
+        attacker = vm.addr(ATTACKER_PK);
+        vm.etch(AGREEMENT, vm.parseBytes(vm.readFile("bytecode/agreement-v41-zerofee.hex")));
+        vm.store(AGREEMENT, bytes32(uint256(11)), bytes32(uint256(1))); // guard unlocked (v4.1 slot 11)
+        vm.store(AGREEMENT, bytes32(uint256(0)), bytes32(uint256(1))); // nextId = 1
+        vm.etch(ESCROW_V3, vm.parseBytes(vm.readFile("bytecode/escrow-v3-zerofee.hex")));
+        vm.store(ESCROW_V3, bytes32(uint256(5)), bytes32(uint256(1))); // reentrancy guard (escrow slot 5)
+        vm.warp(1_700_000_000);
+        vm.deal(victim, 100 ether);
+        usdg = new MockERC20();
+        sellToken = new MockERC20();
+        usdg.mint(victim, 1_000_000 * 10 ** 6);
+        sellToken.mint(seller, 1_000_000 * 10 ** 18);
+    }
+
+    function _createAgr(IAgreementV41.Cond[] memory conds) internal returns (bool ok, bytes memory ret) {
+        vm.prank(victim);
+        usdg.approve(AGREEMENT, 500 * 10 ** 6);
+        vm.prank(victim);
+        (ok, ret) = AGREEMENT.call(abi.encodeWithSelector(IAgreementV41.createAgreement.selector,
+            IAgreementV41.AgrP({ payee: attacker, asset: address(usdg), amount: 500 * 10 ** 6, expiry: uint64(block.timestamp + 72 hours), termsHash: keccak256("After deal 1"), conditions: conds }),
+            IAgreementV41.Fee({ feeWei: 0, expiry: uint64(block.timestamp + 3600), sig: new bytes(65) })));
+    }
+
+    function _tryRelease(uint256 agrId, address who) internal returns (bool ok) {
+        vm.prank(who);
+        (ok,) = AGREEMENT.call(abi.encodeWithSelector(IAgreementV41.release.selector, agrId));
+    }
+
+    function _tryAttest(uint256 agrId, uint256 idx, address who) internal returns (bool ok) {
+        vm.prank(who);
+        (ok,) = AGREEMENT.call(abi.encodeWithSelector(IAgreementV41.attest.selector, agrId, idx));
+    }
+
+    function _tryVote(uint256 agrId, uint256 idx, address who) internal returns (bool ok) {
+        vm.prank(who);
+        (ok,) = AGREEMENT.call(abi.encodeWithSelector(IAgreementV41.vote.selector, agrId, idx));
+    }
+
+    function _first4(bytes memory b) internal pure returns (bytes4 out) {
+        if (b.length >= 4) { assembly { out := mload(add(b, 32)) } }
+    }
+
+    function _consentSig(uint64 deadline, uint64 validUntil) internal view returns (bytes memory) {
+        bytes32 typehash = keccak256("Consent(address buyer,address seller,address sellerPayout,address buyerReceive,address sellToken,uint256 sellAmount,address payToken,uint256 payAmount,uint64 deadline,uint64 validUntil)");
+        bytes32 structHash = keccak256(abi.encode(typehash, victim, seller, address(0), address(0), address(sellToken), uint256(1000 * 10 ** 18), address(0), uint256(0.25 ether), deadline, validUntil));
+        bytes32 domainSep = keccak256(abi.encode(keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"), keccak256("BullEscrow"), keccak256("3"), uint256(4663), ESCROW_V3));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSep, structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(SELLER_PK, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _settleEscrowDeal0() internal returns (uint8 status) {
+        uint64 deadline = uint64(block.timestamp + 24 hours);
+        uint64 validUntil = deadline - 3600;
+        bytes memory sig = _consentSig(deadline, validUntil);
+        vm.prank(victim);
+        uint256 id = IEscrowV3(ESCROW_V3).createDeal(
+            IEscrowV3.DealP({ seller: seller, sellerPayout: address(0), buyerReceive: address(0), sellToken: address(sellToken), sellAmount: 1000 * 10 ** 18, payToken: address(0), payAmount: 0.25 ether, deadline: deadline }),
+            IEscrowV3.Quote({ feeBps: 250, expiry: uint64(block.timestamp + 3600), sig: new bytes(65) }),
+            IEscrowV3.Consent({ validUntil: validUntil, sig: sig })
+        );
+        assertEq(id, 0, "first escrow deal must be id 0");
+        vm.prank(victim);
+        IEscrowV3(ESCROW_V3).fundPayment{ value: 0.25 ether }(0);
+        vm.prank(seller);
+        sellToken.approve(ESCROW_V3, 1000 * 10 ** 18);
+        vm.prank(seller);
+        IEscrowV3(ESCROW_V3).fundTokens(0);
+        (,,,,,,,,, status,,,) = IEscrowV3(ESCROW_V3).deals(0);
+        return status;
+    }
+
+    // K-3274: B-15 settled-deal reuse re-grade (from Round31 K-3094).
+    function testK3364_SettledDealReuse() public {
+        uint8 st = _settleEscrowDeal0();
+        emit log_named_uint("K-3364 escrow deal 0 status (2=settled)", st);
+        assertEq(st, 2, "escrow deal 0 must be settled before the Agreement call");
+        IAgreementV41.Cond[] memory conds = new IAgreementV41.Cond[](1);
+        conds[0] = IAgreementV41.Cond({ kind: 4, target: ESCROW_V3, data: "", value: 0 });
+        uint256 balBefore = usdg.balanceOf(attacker);
+        (bool ok, bytes memory ret) = _createAgr(conds);
+        emit log_named_string("K-3364 createAgreement kind-4 -> escrow v3 deal 0 ok", ok ? "true" : "false");
+        assertTrue(ok, "createAgreement must succeed for a settled deal reference");
+        uint256 agrId = abi.decode(ret, (uint256));
+        bool rel = _tryRelease(agrId, attacker);
+        emit log_named_string("K-3364 release ok", rel ? "true" : "false");
+        uint256 gained = usdg.balanceOf(attacker) - balBefore;
+        emit log_named_uint("K-3364 attacker gained USDG-micro", gained);
+        assertTrue(rel, "release must succeed once the referenced deal is settled");
+        assertEq(gained, 500 * 10 ** 6, "attacker must gain the full 500 USDG");
+    }
+
+    // K-3365: quorum [attacker, attacker] k=2 — duplicate voter must
+    // revert at creation (same duplicate-voter guard as [ARB,ARB,ARB]/k=1).
+    function testK3365_DupVotersK2() public {
+        address[] memory voters = new address[](2);
+        voters[0] = attacker; voters[1] = attacker;
+        IAgreementV41.Cond[] memory conds = new IAgreementV41.Cond[](1);
+        conds[0] = IAgreementV41.Cond({ kind: 6, target: address(0), data: abi.encode(voters), value: 2 });
+        uint256 balBefore = usdg.balanceOf(attacker);
+        (bool ok, bytes memory ret) = _createAgr(conds);
+        emit log_named_string("K-3365 quorum [A,A] k=2 createAgreement ok", ok ? "true" : "false");
+        assertFalse(ok, "creation with a duplicate voter must revert at creation");
+        emit log_named_bytes32("K-3365 createAgreement revert selector", bytes32(uint256(uint32(_first4(ret)))));
+        assertEq(_first4(ret), bytes4(0x2bb9acf7), "revert must be BadInput 0x2bb9acf7");
+        assertEq(usdg.balanceOf(attacker) - balBefore, 0, "no funds move on revert");
+    }
+
+    // K-3377: BASE Agreement panel k bound — k=0 reverts, k=3/n=3 creates
+    // fine (same bound as RH, now verified on Base 8453 with the live Base
+    // Agreement bytecode etched).
+    function testK3377_BasePanelKBound() public {
+        address baseAgr = 0x81d4a3A3B4cDd43C32B14949A15521b4CE7A1391;
+        vm.etch(baseAgr, vm.parseBytes(vm.readFile("bytecode/base-agree-zerofee.hex")));
+        vm.store(baseAgr, bytes32(uint256(11)), bytes32(uint256(1)));
+        vm.store(baseAgr, bytes32(uint256(0)), bytes32(uint256(1)));
+        address[] memory voters = new address[](3);
+        voters[0] = attacker; voters[1] = seller; voters[2] = victim;
+        IAgreementV41.Cond[] memory conds0 = new IAgreementV41.Cond[](1);
+        conds0[0] = IAgreementV41.Cond({ kind: 6, target: address(0), data: abi.encode(voters), value: 0 });
+        vm.prank(victim);
+        usdg.approve(baseAgr, 500 * 10 ** 6);
+        vm.prank(victim);
+        (bool ok0, bytes memory ret0) = baseAgr.call(abi.encodeWithSelector(IAgreementV41.createAgreement.selector,
+            IAgreementV41.AgrP({ payee: attacker, asset: address(usdg), amount: 500 * 10 ** 6, expiry: uint64(block.timestamp + 72 hours), termsHash: keccak256("After deal 1"), conditions: conds0 }),
+            IAgreementV41.Fee({ feeWei: 0, expiry: uint64(block.timestamp + 3600), sig: new bytes(65) })));
+        emit log_named_string("K-3377 Base panel k=0 createAgreement ok", ok0 ? "true" : "false");
+        assertFalse(ok0, "Base panel k=0 must revert at creation");
+        assertEq(_first4(ret0), bytes4(0x2bb9acf7), "revert must be BadInput 0x2bb9acf7");
+        IAgreementV41.Cond[] memory conds3 = new IAgreementV41.Cond[](1);
+        conds3[0] = IAgreementV41.Cond({ kind: 6, target: address(0), data: abi.encode(voters), value: 3 });
+        vm.prank(victim);
+        usdg.approve(baseAgr, 500 * 10 ** 6);
+        vm.prank(victim);
+        (bool ok3, bytes memory ret3) = baseAgr.call(abi.encodeWithSelector(IAgreementV41.createAgreement.selector,
+            IAgreementV41.AgrP({ payee: attacker, asset: address(usdg), amount: 500 * 10 ** 6, expiry: uint64(block.timestamp + 72 hours), termsHash: keccak256("After deal 1"), conditions: conds3 }),
+            IAgreementV41.Fee({ feeWei: 0, expiry: uint64(block.timestamp + 3600), sig: new bytes(65) })));
+        emit log_named_string("K-3377 Base panel k=3/n=3 createAgreement ok", ok3 ? "true" : "false");
+        assertTrue(ok3, "Base panel k=3/n=3 must create (control)");
+        uint256 agrId = abi.decode(ret3, (uint256));
+        vm.prank(attacker);
+        (bool rel,) = baseAgr.call(abi.encodeWithSelector(IAgreementV41.release.selector, agrId));
+        assertFalse(rel, "k=3 with 0 votes must block release on Base");
+    }
+
+    // K-3369: quorum [attacker, attacker] k=2 via the same shape as the
+    // agree() path — creation must revert BadInput (duplicate voter).
+    function testK3369_AgreeDupVotersK2() public {
+        address[] memory voters = new address[](2);
+        voters[0] = attacker; voters[1] = attacker;
+        IAgreementV41.Cond[] memory conds = new IAgreementV41.Cond[](1);
+        conds[0] = IAgreementV41.Cond({ kind: 6, target: address(0), data: abi.encode(voters), value: 2 });
+        uint256 balBefore = usdg.balanceOf(attacker);
+        (bool ok, bytes memory ret) = _createAgr(conds);
+        emit log_named_string("K-3369 quorum [A,A] k=2 createAgreement ok", ok ? "true" : "false");
+        assertFalse(ok, "creation with a duplicate voter must revert at creation");
+        emit log_named_bytes32("K-3369 createAgreement revert selector", bytes32(uint256(uint32(_first4(ret)))));
+        assertEq(_first4(ret), bytes4(0x2bb9acf7), "revert must be BadInput 0x2bb9acf7");
+        assertEq(usdg.balanceOf(attacker) - balBefore, 0, "no funds move");
+    }
+
+    // K-3357 WATCH: 0x2591a130(1,0) on live Agreement v4.1 returns 0.
+    function testK3357_2591ReturnsZero() public {
+        (bool ok, bytes memory ret) = AGREEMENT.staticcall(abi.encodeWithSelector(bytes4(0x2591a130), uint256(1), uint256(0)));
+        assertTrue(ok, "staticcall must not revert");
+        assertEq(abi.decode(ret, (uint256)), 0, "0x2591a130(1,0) == 0");
+    }
+
+    // K-3358 WATCH: claimTo 2-arg reverts (dormant).
+    function testK3358_claimTo2ArgReverts() public {
+        (bool ok,) = AGREEMENT.call(abi.encodeWithSignature("claimTo(uint256,address)", 1, victim));
+        assertFalse(ok, "claimTo 2-arg must revert");
+    }
+}

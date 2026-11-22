@@ -1,0 +1,23 @@
+{
+  "mode": "k4659",
+  "sdk": "b6e7d25c91d1a77f324ec1e97109f01e5ba5110f52f5f1f949fd5ab7d09afe2b",
+  "agreement": "v4.1-0x7AB58fAAe65eFCF0037635382cAA546EaC233DA6",
+  "results": [
+    {
+      "case": "K-4659 NODE resume baselineId 99999: agreement 1 hidden, SECOND $100 agreement opened + funded, duplicate released to seller (M-2309)",
+      "firstAgreementId": "1",
+      "firstErr": "",
+      "buyerLockedFirst100": "100000000",
+      "resumedId": "2",
+      "resumeErr": "",
+      "buyerLockedSecond100": "100000000",
+      "buyerLockedTotalUsdg": "200",
+      "nextAgreementIdSlot": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "secondAgreementOpened": true,
+      "duplicateAttested": true,
+      "duplicateReleased": true,
+      "sellerGainedFromDuplicateUsdg": "100",
+      "doubleOpenProvenOnChain": true
+    }
+  ]
+}

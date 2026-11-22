@@ -1,0 +1,20 @@
+Bull SDK WARNING: using http://127.0.0.1:3022 instead of https://www.bull.family. Only continue if you run this server yourself.
+[K-4659 NODE resume baselineId 99999: agreement 1 hidden, SECOND $100 agreement opened + funded, duplicate released to seller (M-2309)] {"case":"K-4659 NODE resume baselineId 99999: agreement 1 hidden, SECOND $100 agreement opened + funded, duplicate released to seller (M-2309)","firstAgreementId":"1","firstErr":"","buyerLockedFirst100":"100000000","resumedId":"2","resumeErr":"","buyerLockedSecond100":"100000000","buyerLockedTotalUsdg":"200","nextAgreementIdSlot":"0x0000000000000000000000000000000000000000000000000000000000000003","secondAgreementOpened":true,"duplicateAttested":true,"duplicateReleased":true,"sellerGainedFromDuplicateUsdg":"100","doubleOpenProvenOnChain":true}
+[
+  {
+    "case": "K-4659 NODE resume baselineId 99999: agreement 1 hidden, SECOND $100 agreement opened + funded, duplicate released to seller (M-2309)",
+    "firstAgreementId": "1",
+    "firstErr": "",
+    "buyerLockedFirst100": "100000000",
+    "resumedId": "2",
+    "resumeErr": "",
+    "buyerLockedSecond100": "100000000",
+    "buyerLockedTotalUsdg": "200",
+    "nextAgreementIdSlot": "0x0000000000000000000000000000000000000000000000000000000000000003",
+    "secondAgreementOpened": true,
+    "duplicateAttested": true,
+    "duplicateReleased": true,
+    "sellerGainedFromDuplicateUsdg": "100",
+    "doubleOpenProvenOnChain": true
+  }
+]
